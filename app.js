@@ -8,6 +8,21 @@ const LOCAL_NODE_HEIGHT = 92;
 const LOCAL_COUPLE_GAP = 10;
 const LOCAL_UNIT_GAP = 30;
 const LOCAL_ROW_STEP = 124;
+const LOCAL_TREE_DEPTH = 5;
+const COMMON_GEO_LOCATIONS = [
+  { aliases: ["成都", "成都市", "四川成都", "四川省成都市"], label: "成都市, 四川省, 中国", lat: 30.5728, lng: 104.0668, country: "中国" },
+  { aliases: ["巴中", "巴中市", "四川巴中", "四川省巴中市"], label: "巴中市, 四川省, 中国", lat: 31.8679, lng: 106.7475, country: "中国" },
+  { aliases: ["巴州区", "巴中巴州区", "巴中市巴州区", "四川省巴中市巴州区"], label: "巴州区, 巴中市, 四川省, 中国", lat: 31.8515, lng: 106.7689, country: "中国" },
+  { aliases: ["广元", "广元市", "四川广元", "四川省广元市"], label: "广元市, 四川省, 中国", lat: 32.4354, lng: 105.8436, country: "中国" },
+  { aliases: ["旺苍", "旺苍县", "广元旺苍县", "四川省广元市旺苍县"], label: "旺苍县, 广元市, 四川省, 中国", lat: 32.2283, lng: 106.2901, country: "中国" },
+  { aliases: ["北京", "北京市"], label: "北京市, 中国", lat: 39.9042, lng: 116.4074, country: "中国" },
+  { aliases: ["上海", "上海市"], label: "上海市, 中国", lat: 31.2304, lng: 121.4737, country: "中国" },
+  { aliases: ["广州", "广州市"], label: "广州市, 广东省, 中国", lat: 23.1291, lng: 113.2644, country: "中国" },
+  { aliases: ["深圳", "深圳市"], label: "深圳市, 广东省, 中国", lat: 22.5431, lng: 114.0579, country: "中国" },
+  { aliases: ["重庆", "重庆市"], label: "重庆市, 中国", lat: 29.563, lng: 106.5516, country: "中国" },
+  { aliases: ["西安", "西安市"], label: "西安市, 陕西省, 中国", lat: 34.3416, lng: 108.9398, country: "中国" },
+  { aliases: ["武汉", "武汉市"], label: "武汉市, 湖北省, 中国", lat: 30.5928, lng: 114.3055, country: "中国" },
+];
 let leafletLoadPromise = null;
 
 const state = {
@@ -69,6 +84,14 @@ function normalizePerson(person) {
     next.generationLevel === null || next.generationLevel === undefined || next.generationLevel === ""
       ? null
       : Number(next.generationLevel);
+  const siblingRankNumber = Number(next.siblingRank);
+  next.siblingRank =
+    next.siblingRank === null ||
+    next.siblingRank === undefined ||
+    next.siblingRank === "" ||
+    !Number.isFinite(siblingRankNumber)
+      ? null
+      : Math.min(10, Math.max(1, siblingRankNumber));
   next.geoScope = next.geoScope || "";
   next.geoLabel = next.geoLabel || "";
   next.geoLat =
@@ -273,6 +296,36 @@ function getSiblingCandidatesByParents(id) {
   return [...siblingIds].map(getPerson).filter(Boolean);
 }
 
+function getExplicitSiblingPersons(id) {
+  const siblingIds = new Set();
+  activeRelations()
+    .filter(
+      (relation) =>
+        relation.type === "sibling" &&
+        (relation.fromPersonId === id || relation.toPersonId === id),
+    )
+    .forEach((relation) => {
+      siblingIds.add(relation.fromPersonId === id ? relation.toPersonId : relation.fromPersonId);
+    });
+  return [...siblingIds].map(getPerson).filter(Boolean);
+}
+
+function getSiblingGroup(personId) {
+  const person = getPerson(personId);
+  if (!person) return [];
+  return uniquePersons([person, ...getSiblingCandidatesByParents(personId), ...getExplicitSiblingPersons(personId)])
+    .sort(compareSiblingOrder);
+}
+
+function getConfiguredSiblingRank(person) {
+  const rank = Number(person?.siblingRank);
+  return Number.isInteger(rank) && rank >= 1 && rank <= 10 ? rank : null;
+}
+
+function getSiblingRank(personId) {
+  return getConfiguredSiblingRank(getPerson(personId));
+}
+
 function getRelationsFor(id) {
   const relations = activeRelations();
   const fatherRel = relations.find(
@@ -341,6 +394,7 @@ function createPerson(input) {
     birthYear: input.birthYear || null,
     birthText: input.birthText || null,
     generationLevel: input.generationLevel ?? null,
+    siblingRank: input.siblingRank ?? null,
     geoScope: input.geoScope || "",
     geoLabel: input.geoLabel || "",
     geoLat: input.geoLat ?? null,
@@ -420,6 +474,12 @@ function getSiblingReverseRole(role) {
 }
 
 function compareSiblingOrder(first, second) {
+  const firstRank = getConfiguredSiblingRank(first);
+  const secondRank = getConfiguredSiblingRank(second);
+  if (firstRank !== null && secondRank !== null && firstRank !== secondRank) return firstRank - secondRank;
+  if (firstRank !== null && secondRank === null) return -1;
+  if (firstRank === null && secondRank !== null) return 1;
+
   const firstYear = first.birthTimeType === "exact" ? Number(first.birthYear) : null;
   const secondYear = second.birthTimeType === "exact" ? Number(second.birthYear) : null;
   if (Number.isFinite(firstYear) && Number.isFinite(secondYear) && firstYear !== secondYear) {
@@ -566,6 +626,9 @@ function readPersonForm(form, overrides = {}) {
   const name = form.name.value.trim();
   if (!name) errors.name = "请填写姓名";
 
+  const generationValue = form.generationLevel?.value ?? "";
+  if (generationValue === "") errors.generationLevel = "请选择辈分级次";
+
   const birthTimeType = form.birthTimeType?.value || "exact";
   Object.assign(
     errors,
@@ -584,7 +647,7 @@ function readPersonForm(form, overrides = {}) {
 
   const birthYearValue = form.birthYear?.value.trim();
   const birthTextValue = form.birthText?.value.trim();
-  const generationValue = form.generationLevel?.value ?? "";
+  const siblingRankValue = form.siblingRank?.value ?? "1";
   const geoLatValue = form.geoLat?.value ?? "";
   const geoLngValue = form.geoLng?.value ?? "";
   return {
@@ -594,6 +657,7 @@ function readPersonForm(form, overrides = {}) {
     birthYear: birthTimeType === "exact" && birthYearValue ? Number(birthYearValue) : null,
     birthText: birthTimeType === "approx" && birthTextValue ? birthTextValue : null,
     generationLevel: generationValue === "" ? null : Number(generationValue),
+    siblingRank: Number(siblingRankValue) || 1,
     geoScope: form.geoScope?.value || "",
     geoLabel: form.geoLabel?.value?.trim() || form.geoQuery?.value?.trim() || "",
     geoLat: geoLatValue === "" ? null : Number(geoLatValue),
@@ -781,6 +845,7 @@ function searchPersons(query) {
 function render() {
   const app = document.getElementById("app");
   app.innerHTML = shellV2(renderPage());
+  normalizeUiLabels(app);
   bindEvents(app);
   if (state.route.name === "dashboard") requestAnimationFrame(bindDashboardMapDisclosure);
   if (state.route.name === "tree") requestAnimationFrame(centerLocalKinshipView);
@@ -796,6 +861,20 @@ function render() {
       }
     }, 8000);
   }
+}
+
+function normalizeUiLabels(root) {
+  root.querySelectorAll('button[data-go="/tree"], button[data-star-local]').forEach((button) => {
+    button.textContent = "局部谱";
+  });
+  root.querySelectorAll("button[data-go]").forEach((button) => {
+    if (button.classList.contains("local-person-node")) return;
+    const target = button.getAttribute("data-go") || "";
+    const label = button.textContent.trim();
+    if (target.startsWith("/tree/local/") && (label.includes("局部树") || label.includes("局部图"))) {
+      button.textContent = "局部谱";
+    }
+  });
 }
 
 function shellV2(content) {
@@ -833,7 +912,7 @@ function shell(content) {
         </div>
         <nav class="nav">
           <button data-go="/">⌂ 首页</button>
-          <button data-go="/tree">◎ 局部树</button>
+          <button data-go="/tree">◎ 局部谱</button>
           <button data-go="/">家族星图</button>
           <button data-go="/incomplete">※ 待补充</button>
           <button data-go="/persons">☷ 成员</button>
@@ -879,7 +958,7 @@ function renderHomeStarMap() {
         <p id="star-person-meta">${escapeHtml(formatGenerationLevel(focus.generationLevel))}${focus.geoLabel ? ` · ${escapeHtml(focus.geoLabel)}` : ""}</p>
         <div class="actions">
           <button data-star-detail>成员资料</button>
-          <button data-star-local>局部图</button>
+          <button data-star-local>局部谱</button>
         </div>
       </aside>
       <div class="star-legend">
@@ -903,7 +982,7 @@ function renderHomePageV2() {
       <section class="home-overview">
         <div>
           <h1>双系家谱</h1>
-          <p class="muted">先创建第一位家庭成员。之后每位成员都可以作为局部图或全局图的观察中心。</p>
+          <p class="muted">先创建第一位家庭成员。之后每位成员都可以作为局部谱或星图的观察中心。</p>
         </div>
       </section>
       <section class="section">
@@ -921,10 +1000,10 @@ function renderHomePageV2() {
     <section class="home-overview">
       <div>
         <h1>双系家谱</h1>
-        <p class="muted">选择任意成员作为观察中心，进入局部图、全局图或统计地图。</p>
+        <p class="muted">选择任意成员作为观察中心，进入局部谱、星图或统计地图。</p>
       </div>
       <div class="actions">
-        <button class="primary" data-go="/tree/local/${focus.id}">局部图</button>
+        <button class="primary" data-go="/tree/local/${focus.id}">局部谱</button>
         <button data-go="/" data-highlight="${focus.id}">家族星图</button>
         <button data-go="/dashboard">统计与地图</button>
       </div>
@@ -981,9 +1060,9 @@ function renderHomePage() {
     <section class="hero">
       <div class="hero-copy">
         <h1>双系家谱</h1>
-        <p>当前根成员是 ${escapeHtml(self.name)}。局部树负责精确编辑，全局图负责定位和看全貌，待补充列表负责推动资料完善。</p>
+        <p>当前根成员是 ${escapeHtml(self.name)}。局部谱负责精确编辑，星图负责定位和看全貌，待补充列表负责推动资料完善。</p>
         <div class="actions">
-          <button class="primary" data-go="/tree/local/${self.id}">◎ 局部树</button>
+          <button class="primary" data-go="/tree/local/${self.id}">◎ 局部谱</button>
           <button data-go="/">家族星图</button>
           <button data-go="/incomplete">※ 待补充</button>
         </div>
@@ -1127,7 +1206,7 @@ function renderPersonDetailPage(id) {
           <p class="muted">成员详情</p>
         </div>
         <div class="actions">
-          <button data-go="/tree/local/${person.id}">◎ 局部树</button>
+          <button data-go="/tree/local/${person.id}">◎ 局部谱</button>
           <button data-go="/" data-highlight="${person.id}">在星图中查看</button>
           <button data-modal="edit:${person.id}">✎ 编辑</button>
           <button class="danger" data-modal="delete:${person.id}">⌫ 删除</button>
@@ -1150,11 +1229,11 @@ function renderPersonDetailPage(id) {
         <button data-modal="relative:${person.id}:youngerSister">+ 妹妹</button>
       </div>
       <div class="relation-grid">
-        ${renderRelationSection("兄弟姐妹", relations.siblings)}
         ${renderRelationSection("父亲", relations.father ? [relations.father] : [])}
         ${renderRelationSection("母亲", relations.mother ? [relations.mother] : [])}
+        ${renderRelationSection("兄弟姐妹", relations.siblings)}
         ${renderRelationSection("配偶", relations.spouses)}
-        ${renderRelationSection("子女", relations.children)}
+        ${renderRelationSection("子女", relations.children, "relation-section-wide")}
       </div>
     </section>
   `;
@@ -1176,7 +1255,20 @@ function renderTreeSearch() {
   `;
 }
 
-function buildLocalKinshipGraph(centerId, maxDepth = 3) {
+function renderLocalGenerationGuide(depth) {
+  const labels = [];
+  for (let generation = depth; generation >= -depth; generation -= 1) {
+    labels.push(generation === 0 ? "同辈" : generation > 0 ? `上${generation}代` : `下${Math.abs(generation)}代`);
+  }
+  return `
+    <div class="local-generation-guide">
+      <strong>图中由上至下</strong>
+      ${labels.map((label) => `<span>${label}</span>`).join("")}
+    </div>
+  `;
+}
+
+function buildLocalKinshipGraph(centerId, maxDepth = LOCAL_TREE_DEPTH) {
   const center = getPerson(centerId);
   if (!center) return { nodes: [], edges: [], width: 900, height: 760 };
   const included = new Map([[center.id, { person: center, generation: 0, kind: "center" }]]);
@@ -1420,20 +1512,33 @@ function buildLocalKinshipGraph(centerId, maxDepth = 3) {
       }
     });
 
-  return { nodes, edges, width, height };
+  const generationRows = [];
+  for (let generation = maxVisibleGeneration; generation >= minVisibleGeneration; generation -= 1) {
+    generationRows.push({
+      generation,
+      y: 24 + (maxVisibleGeneration - generation) * LOCAL_ROW_STEP,
+      level:
+        center.generationLevel === null || center.generationLevel === undefined
+          ? null
+          : Number(center.generationLevel) + generation,
+    });
+  }
+
+  return { nodes, edges, width, height, generationRows };
 }
 
 function renderLocalKinshipPage(routeId) {
   const center = routeId ? getPerson(routeId) : getFocusPerson();
   if (!center) return renderMissing("请先创建一位成员，再查看局部谱。", true);
   state.highlightedId = center.id;
-  const graph = buildLocalKinshipGraph(center.id, 3);
+  const graph = buildLocalKinshipGraph(center.id, LOCAL_TREE_DEPTH);
+  const visibleSiblingRanks = getVisibleSiblingRanks(graph.nodes);
   return `
     <section class="section local-kinship-page">
       <div class="toolbar">
         <div>
-          <h2>三代局部谱</h2>
-          <p class="muted">以 ${escapeHtml(center.name)} 为中心，向上三代、向下三代；点击任意成员可重新居中。</p>
+          <h2>五代局部谱</h2>
+          <p class="muted">以 ${escapeHtml(center.name)} 为中心，向上五代、向下五代；点击任意成员可重新居中。</p>
         </div>
         <div class="actions">
           <button data-go="/">家族星图</button>
@@ -1441,30 +1546,62 @@ function renderLocalKinshipPage(routeId) {
         </div>
       </div>
       ${renderTreeSearch()}
-      <div class="local-generation-guide">
-        <strong>图中由上至下</strong>
-        <span>上三代</span><span>上二代</span><span>上一代</span><span>同辈</span><span>下一代</span><span>下二代</span><span>下三代</span>
-      </div>
+      ${renderLocalGenerationGuide(LOCAL_TREE_DEPTH)}
       <div class="local-line-legend" aria-label="关系线说明">
         <span><i class="parent"></i>生育线</span>
         <span><i class="couple"></i>婚姻线</span>
         <span><i class="sibling"></i>兄弟姐妹</span>
+        <span><i class="rank"></i>排行数字：同父母兄弟姐妹从大到小</span>
         <span><i class="alive"></i>健在</span>
         <span><i class="deceased"></i>已故</span>
       </div>
       <div class="local-kinship-wrap" id="local-kinship-wrap">
         <div class="local-kinship-canvas" id="local-kinship-canvas" style="width:${graph.width}px; height:${graph.height}px">
+          ${renderLocalGenerationLevels(graph.generationRows)}
           <svg class="local-edge-layer" viewBox="0 0 ${graph.width} ${graph.height}" style="width:${graph.width}px; height:${graph.height}px" aria-hidden="true">
             ${graph.edges.map((edge) => renderLocalKinshipEdge(edge, graph.nodes)).join("")}
           </svg>
-          ${graph.nodes.map((node) => renderLocalKinshipNode(node, center.id)).join("")}
+          ${graph.nodes.map((node) => renderLocalKinshipNode(node, center.id, visibleSiblingRanks.get(node.person.id))).join("")}
         </div>
       </div>
     </section>
   `;
 }
 
-function renderLocalKinshipNode(node, centerId) {
+function getVisibleSiblingRanks(nodes) {
+  const visibleIds = new Set(nodes.map((node) => node.person.id));
+  const ranks = new Map();
+  nodes.forEach((node) => {
+    const group = getSiblingGroup(node.person.id);
+    const visibleGroup = group.filter((person) => visibleIds.has(person.id));
+    if (visibleGroup.length <= 1) return;
+    visibleGroup.forEach((person) => {
+      const rank = getConfiguredSiblingRank(person);
+      if (rank !== null) ranks.set(person.id, rank);
+    });
+  });
+  return ranks;
+}
+
+function renderLocalGenerationLevels(rows) {
+  if (!rows?.length) return "";
+  return `
+    <div class="local-level-axis" aria-label="辈分层级">
+      ${rows
+        .map(
+          (row) => `
+            <div class="local-level-chip" style="top:${row.y + LOCAL_NODE_HEIGHT / 2}px">
+              <strong>${escapeHtml(formatGenerationLevel(row.level))}</strong>
+              <span>${row.generation === 0 ? "中心层" : row.generation > 0 ? `上${row.generation}代` : `下${Math.abs(row.generation)}代`}</span>
+            </div>
+          `,
+        )
+        .join("")}
+    </div>
+  `;
+}
+
+function renderLocalKinshipNode(node, centerId, siblingRank = null) {
   return `
     <button
       class="local-person-node ${node.person.gender} ${node.person.isAlive ? "alive" : "deceased"} ${node.person.id === centerId ? "center" : ""} ${node.kind || ""}"
@@ -1472,6 +1609,7 @@ function renderLocalKinshipNode(node, centerId) {
       data-go="/tree/local/${node.person.id}"
       title="点击以此人为中心"
     >
+      ${siblingRank ? `<span class="sibling-rank" title="同父母兄弟姐妹从大到小排行">${siblingRank}</span>` : ""}
       <strong>${escapeHtml(node.person.name)}</strong>
       ${node.kind === "spouse" ? "<span>配偶</span>" : node.kind === "sibling" ? "<span>兄弟姐妹</span>" : ""}
     </button>
@@ -2250,9 +2388,12 @@ function renderPersonForm({ id, person = null, relationType = null, submitText }
   const gender = fixedGender || person?.gender || "male";
   const birthTimeType = person?.birthTimeType || (person?.birthYear ? "exact" : "exact");
   const generationLevel = person?.generationLevel ?? "";
+  const siblingRank = person?.siblingRank ?? 1;
   const geoScope = person?.geoScope || "";
+  const isSiblingRelation = Boolean(getSiblingReverseRole(relationType));
   return `
     <form class="form-panel" id="${id}" novalidate>
+      ${isSiblingRelation ? `<p class="form-tip">兄弟姐妹排行会在局部谱中显示为 1、2、3；数字越小表示年龄越长，请在下方填写准确排行。</p>` : ""}
       <div class="form-grid">
         <div class="field">
           <label for="${id}-name">姓名</label>
@@ -2268,12 +2409,22 @@ function renderPersonForm({ id, person = null, relationType = null, submitText }
         </div>
         <div class="field">
           <label for="${id}-generationLevel">辈分级次</label>
-          <select id="${id}-generationLevel" name="generationLevel">
-            <option value="" ${generationLevel === "" ? "selected" : ""}>未设置</option>
+          <select id="${id}-generationLevel" name="generationLevel" required>
+            <option value="" ${generationLevel === "" ? "selected" : ""}>请选择（必填）</option>
             ${[5, 4, 3, 2, 1, 0, -1, -2, -3, -4, -5]
               .map((level) => `<option value="${level}" ${Number(generationLevel) === level ? "selected" : ""}>${formatGenerationLevel(level)}</option>`)
               .join("")}
           </select>
+          <div class="field-error" data-error-for="generationLevel"></div>
+        </div>
+        <div class="field">
+          <label for="${id}-siblingRank">兄弟姐妹排行</label>
+          <select id="${id}-siblingRank" name="siblingRank">
+            ${Array.from({ length: 10 }, (_, index) => index + 1)
+              .map((rank) => `<option value="${rank}" ${Number(siblingRank) === rank ? "selected" : ""}>${rank}</option>`)
+              .join("")}
+          </select>
+          <p class="field-hint">1 表示同父母兄弟姐妹中最大，2 表示第二；独生子女填 1。</p>
         </div>
         <div class="field full geo-field">
           <label>地理标签</label>
@@ -2298,6 +2449,7 @@ function renderPersonForm({ id, person = null, relationType = null, submitText }
           <div class="geo-results" data-geo-results></div>
         </div>
         <div class="field full birth-field">
+          <p class="field-hint">出生时间可精确填写年份，也可以使用模糊时间描述。</p>
           <label>出生时间</label>
           <div class="segmented">
             <label><input type="radio" name="birthTimeType" value="exact" ${birthTimeType !== "approx" ? "checked" : ""} /> 精确年份</label>
@@ -2376,9 +2528,9 @@ function renderPersonSummary(person) {
   `;
 }
 
-function renderRelationSection(title, persons) {
+function renderRelationSection(title, persons, className = "") {
   return `
-    <section class="relation-section">
+    <section class="relation-section ${className}">
       <h3>${title}</h3>
       ${
         persons.length
@@ -2499,9 +2651,10 @@ function bindEvents(root) {
 
   const selfForm = root.querySelector("#self-form");
   if (selfForm) {
-    selfForm.addEventListener("submit", (event) => {
+    selfForm.addEventListener("submit", async (event) => {
       event.preventDefault();
       try {
+        await resolvePendingGeoInput(selfForm);
         submitSelf(selfForm);
       } catch (error) {
         if (error.message !== "FORM_HAS_INLINE_ERRORS") notify(error.message);
@@ -2511,9 +2664,10 @@ function bindEvents(root) {
 
   const editForm = root.querySelector("#edit-form");
   if (editForm && state.modal?.startsWith("edit:")) {
-    editForm.addEventListener("submit", (event) => {
+    editForm.addEventListener("submit", async (event) => {
       event.preventDefault();
       try {
+        await resolvePendingGeoInput(editForm);
         updatePerson(state.modal.split(":")[1], editForm);
       } catch (error) {
         if (error.message !== "FORM_HAS_INLINE_ERRORS") notify(error.message);
@@ -2523,10 +2677,11 @@ function bindEvents(root) {
 
   const relativeForm = root.querySelector("#relative-form");
   if (relativeForm && state.modal?.startsWith("relative:")) {
-    relativeForm.addEventListener("submit", (event) => {
+    relativeForm.addEventListener("submit", async (event) => {
       event.preventDefault();
       const [, id, relationType] = state.modal.split(":");
       try {
+        await resolvePendingGeoInput(relativeForm);
         addRelative(id, relationType, relativeForm);
       } catch (error) {
         if (error.message !== "FORM_HAS_INLINE_ERRORS") notify(error.message);
@@ -2713,8 +2868,106 @@ function bindPersonFormLiveValidation(form) {
   });
 }
 
+function normalizeGeoAlias(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[,\s\uFF0C\u3002\u00B7\u3001-]/g, "");
+}
+
+function inferGeoScope(query, scope) {
+  if (scope) return scope;
+  return /[\u4e00-\u9fff]/.test(query) ? "domestic" : "foreign";
+}
+
+function findCommonGeoLocation(query, scope) {
+  if (scope && scope !== "domestic") return null;
+  const normalized = normalizeGeoAlias(query);
+  if (!normalized) return null;
+  return (
+    COMMON_GEO_LOCATIONS.find((location) =>
+      location.aliases.some((alias) => normalizeGeoAlias(alias) === normalized),
+    ) || null
+  );
+}
+
+function normalizeGeoResult(result) {
+  return {
+    label: result.display_name,
+    lat: result.lat,
+    lng: result.lon,
+    country: result.address?.country || "",
+  };
+}
+
+function applyGeoSelection(form, location, { updateQuery = true } = {}) {
+  form.geoLabel.value = location.label;
+  form.geoLat.value = location.lat;
+  form.geoLng.value = location.lng;
+  form.geoCountry.value = location.country || "";
+  if (updateQuery) form.geoQuery.value = location.label;
+  const selected = form.querySelector(".geo-selected");
+  if (selected) selected.textContent = `已选择：${location.label}`;
+}
+
+async function lookupGeography(query, scope, limit = 6) {
+  const params = new URLSearchParams({
+    format: "jsonv2",
+    q: scope === "domestic" ? `${query}, 中国` : query,
+    limit: String(limit),
+    addressdetails: "1",
+    "accept-language": "zh-CN",
+  });
+  if (scope === "domestic") params.set("countrycodes", "cn");
+
+  const response = await fetch(`https://nominatim.openstreetmap.org/search?${params.toString()}`);
+  if (!response.ok) throw new Error("LOCATION_SEARCH_FAILED");
+  let results = await response.json();
+  if (scope === "foreign") {
+    const countries = results.filter((result) => result.type === "country" || result.addresstype === "country");
+    if (countries.length) results = countries;
+  }
+  return results;
+}
+
+async function resolvePendingGeoInput(form) {
+  const query = form.geoQuery?.value.trim() || "";
+  if (!query || !form.geoLabel || !form.geoLat || !form.geoLng) return;
+
+  let scope = inferGeoScope(query, form.geoScope?.value || "");
+  if (form.geoScope && !form.geoScope.value) form.geoScope.value = scope;
+  const currentLabel = form.geoLabel.value.trim();
+  const hasCoordinates = Number.isFinite(Number(form.geoLat.value)) && Number.isFinite(Number(form.geoLng.value));
+  if (currentLabel && hasCoordinates && currentLabel === query) return;
+
+  const selected = form.querySelector(".geo-selected");
+  if (selected) selected.textContent = "正在自动定位地点...";
+
+  const commonLocation = findCommonGeoLocation(query, scope);
+  if (commonLocation) {
+    applyGeoSelection(form, commonLocation, { updateQuery: false });
+    return;
+  }
+
+  try {
+    const results = await lookupGeography(query, scope, 1);
+    if (results.length) {
+      applyGeoSelection(form, normalizeGeoResult(results[0]), { updateQuery: false });
+      return;
+    }
+  } catch {
+    // Keep the typed label even when online geocoding is unavailable.
+  }
+
+  form.geoLabel.value = query;
+  form.geoLat.value = "";
+  form.geoLng.value = "";
+  form.geoCountry.value = scope === "domestic" ? "中国" : "";
+  if (selected) selected.textContent = "已保存地名；暂未定位到坐标，地图不会显示该点。";
+}
+
 async function searchGeography(form) {
-  const scope = form.geoScope?.value || "";
+  const scope = inferGeoScope(form.geoQuery?.value.trim() || "", form.geoScope?.value || "");
   const query = form.geoQuery?.value.trim() || "";
   const resultsNode = form.querySelector("[data-geo-results]");
   if (!scope || !query || !resultsNode) {
@@ -2722,24 +2975,24 @@ async function searchGeography(form) {
     return;
   }
 
+  if (form.geoScope && !form.geoScope.value) form.geoScope.value = scope;
   resultsNode.innerHTML = `<p class="muted">正在搜索地点...</p>`;
-  const params = new URLSearchParams({
-    format: "jsonv2",
-    q: scope === "domestic" ? `${query}, 中国` : query,
-    limit: "6",
-    addressdetails: "1",
-    "accept-language": "zh-CN",
-  });
-  if (scope === "domestic") params.set("countrycodes", "cn");
+
+  const commonLocation = findCommonGeoLocation(query, scope);
+  if (commonLocation) {
+    renderGeographyResults(form, [
+      {
+        display_name: commonLocation.label,
+        lat: commonLocation.lat,
+        lon: commonLocation.lng,
+        address: { country: commonLocation.country },
+      },
+    ]);
+    return;
+  }
 
   try {
-    const response = await fetch(`https://nominatim.openstreetmap.org/search?${params.toString()}`);
-    if (!response.ok) throw new Error("LOCATION_SEARCH_FAILED");
-    let results = await response.json();
-    if (scope === "foreign") {
-      const countries = results.filter((result) => result.type === "country" || result.addresstype === "country");
-      if (countries.length) results = countries;
-    }
+    const results = await lookupGeography(query, scope, 6);
     renderGeographyResults(form, results.slice(0, 6));
   } catch {
     resultsNode.innerHTML = `<p class="field-error">地点服务暂时不可用。可以稍后重试，或先保留输入的地名。</p>`;
